@@ -1,5 +1,4 @@
 // app/api/apply/route.ts
-import nodemailer from 'nodemailer'
 import { NextRequest, NextResponse } from 'next/server'
 
 interface ApplyBody {
@@ -19,16 +18,23 @@ interface ApplyBody {
   portfolio?:  string
 }
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+const siteName  = process.env.NEXT_PUBLIC_SITE_NAME   || 'Web3 Infomatics Solutions'
+const fromEmail = process.env.GMAIL_USER               || ''
+const adminEmail = process.env.ADMIN_EMAIL             || ''
+
 // ── Sanity ────────────────────────────────────────────────────────────────────
 
 async function saveToSanity(body: ApplyBody): Promise<string> {
-  // ✅ Matches your actual .env.local names
   const projectId = process.env.NEXT_PUBLIC_SANITY_PROJECT_ID!
   const dataset   = process.env.NEXT_PUBLIC_SANITY_DATASET!
   const token     = process.env.SANITY_WRITE_TOKEN!
 
   if (!projectId || !dataset || !token) {
-    throw new Error(`Missing Sanity env vars. Got: projectId=${projectId}, dataset=${dataset}, token=${token?.slice(0,8)}`)
+    throw new Error(
+      `Missing Sanity env vars. Got: projectId=${projectId}, dataset=${dataset}, token=${token?.slice(0, 8)}`
+    )
   }
 
   const doc = {
@@ -47,7 +53,6 @@ async function saveToSanity(body: ApplyBody): Promise<string> {
   }
 
   const url = `https://${projectId}.api.sanity.io/v2021-06-07/data/mutate/${dataset}`
-
   console.log('[apply] Saving to Sanity:', url)
 
   const res = await fetch(url, {
@@ -69,9 +74,12 @@ async function saveToSanity(body: ApplyBody): Promise<string> {
   return data?.results?.[0]?.id ?? 'unknown'
 }
 
-// ── Resend ────────────────────────────────────────────────────────────────────
+// ── Email ─────────────────────────────────────────────────────────────────────
 
-async function sendConfirmationEmail(body: ApplyBody): Promise<void> {
+async function sendEmails(body: ApplyBody): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const nodemailer = require('nodemailer')
+
   const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
@@ -86,7 +94,8 @@ async function sendConfirmationEmail(body: ApplyBody): Promise<void> {
 
   const skillsLine = body.skills?.length ? body.skills.join(', ') : 'Not specified'
 
-  const html = `
+  // ── Rich HTML email to applicant ──
+  const applicantHtml = `
 <!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8" /><title>Application Received</title></head>
@@ -108,7 +117,7 @@ async function sendConfirmationEmail(body: ApplyBody): Promise<void> {
             <p style="margin:0 0 16px;font-size:16px;color:#111827;">Hi <strong>${body.name}</strong>,</p>
             <p style="margin:0 0 24px;font-size:15px;color:#374151;line-height:1.6;">
               We've received your application for <strong>${body.internshipTitle}</strong>.
-              Our team will review it and get back to you shortly.
+              Our team will review it and get back to you within 2–3 business days.
             </p>
 
             <table width="100%" cellpadding="0" cellspacing="0"
@@ -138,9 +147,9 @@ async function sendConfirmationEmail(body: ApplyBody): Promise<void> {
               style="border-collapse:collapse;font-size:13px;color:#374151;margin-bottom:24px;">
               ${[
                 ['Email',     body.email],
-                ['Phone',     body.phone    || '—'],
-                ['College',   body.college  || '—'],
-                ['Year',      body.year     || '—'],
+                ['Phone',     body.phone     || '—'],
+                ['College',   body.college   || '—'],
+                ['Year',      body.year      || '—'],
                 ['Skills',    skillsLine],
                 ['Portfolio', body.portfolio || '—'],
               ].map(([label, val], i) => `
@@ -159,7 +168,9 @@ async function sendConfirmationEmail(body: ApplyBody): Promise<void> {
 
         <tr>
           <td style="background:#f9fafb;border-top:1px solid #e5e7eb;padding:18px 40px;text-align:center;">
-            <p style="margin:0;font-size:12px;color:#9ca3af;">This is an automated confirmation from ${siteName}.</p>
+            <p style="margin:0;font-size:12px;color:#9ca3af;">
+              This is an automated confirmation from ${siteName}.
+            </p>
           </td>
         </tr>
 
@@ -169,74 +180,52 @@ async function sendConfirmationEmail(body: ApplyBody): Promise<void> {
 </body>
 </html>`
 
-  // Send confirmation to applicant
-  console.log('[apply] Sending email to:', body.email, 'from:', fromEmail)
-
-  const res = await fetch('https://api.resend.com/emails', {
-    method:  'POST',
-    headers: {
-      'Content-Type':  'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      from:    `${siteName} <${fromEmail}>`,
-      to:      [body.email],
-      subject: `✅ Application received – ${body.internshipTitle} | ${siteName}`,
-      html,
-    }),
+  // Send to applicant
+  await transporter.sendMail({
+    from:    `${siteName} <${fromEmail}>`,
+    to:      body.email,
+    subject: `✅ Application received – ${body.internshipTitle} | ${siteName}`,
+    html:    applicantHtml,
   })
+  console.log('[apply] Confirmation email sent to:', body.email)
 
-  const resData = await res.json()
-  console.log('[apply] Resend applicant response:', JSON.stringify(resData))
-
-  if (!res.ok) {
-    throw new Error(`Resend error ${res.status}: ${JSON.stringify(resData)}`)
-  }
-
-  // Also notify admin
+  // Notify admin
   if (adminEmail) {
-    const adminRes = await fetch('https://api.resend.com/emails', {
-      method:  'POST',
-      headers: {
-        'Content-Type':  'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        from:    `${siteName} <${fromEmail}>`,
-        to:      [adminEmail],
-        subject: `📋 New application: ${body.name} → ${body.internshipTitle}`,
-        html: `
-          <p>New application received on ${new Date().toLocaleString('en-IN')}.</p>
-          <ul>
-            <li><strong>Name:</strong> ${body.name}</li>
-            <li><strong>Email:</strong> ${body.email}</li>
-            <li><strong>Phone:</strong> ${body.phone || '—'}</li>
-            <li><strong>Internship:</strong> ${body.internshipTitle}</li>
-            <li><strong>College:</strong> ${body.college || '—'}</li>
-            <li><strong>Year:</strong> ${body.year || '—'}</li>
-            <li><strong>Skills:</strong> ${skillsLine}</li>
-          </ul>
-          <p><strong>Motivation:</strong><br/>${body.why}</p>
-          ${body.portfolio ? `<p><strong>Portfolio:</strong> <a href="${body.portfolio}">${body.portfolio}</a></p>` : ''}
-        `,
-      }),
+    await transporter.sendMail({
+      from:    `${siteName} <${fromEmail}>`,
+      to:      adminEmail,
+      subject: `📋 New application: ${body.name} → ${body.internshipTitle}`,
+      html: `
+        <p>New application received on ${new Date().toLocaleString('en-IN')}.</p>
+        <ul>
+          <li><strong>Name:</strong> ${body.name}</li>
+          <li><strong>Email:</strong> ${body.email}</li>
+          <li><strong>Phone:</strong> ${body.phone || '—'}</li>
+          <li><strong>Internship:</strong> ${body.internshipTitle}</li>
+          <li><strong>College:</strong> ${body.college || '—'}</li>
+          <li><strong>Year:</strong> ${body.year || '—'}</li>
+          <li><strong>Skills:</strong> ${skillsLine}</li>
+        </ul>
+        <p><strong>Motivation:</strong><br/>${body.why}</p>
+        ${body.portfolio
+          ? `<p><strong>Portfolio:</strong> <a href="${body.portfolio}">${body.portfolio}</a></p>`
+          : ''}
+      `,
     })
-    const adminData = await adminRes.json()
-    console.log('[apply] Resend admin response:', JSON.stringify(adminData))
+    console.log('[apply] Admin notification sent to:', adminEmail)
   }
 }
 
 // ── Route handler ─────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
-  // Log env vars on every request so you can verify in terminal
   console.log('[apply] ENV CHECK:', {
-    projectId:  process.env.NEXT_PUBLIC_SANITY_PROJECT_ID,
-    dataset:    process.env.NEXT_PUBLIC_SANITY_DATASET,
-    token:      process.env.SANITY_WRITE_TOKEN?.slice(0, 10),
-    resendKey:  process.env.RESEND_API_KEY?.slice(0, 10),
-    resendFrom: process.env.RESEND_FROM,
-    adminEmail: process.env.ADMIN_EMAIL,
+    projectId:   process.env.NEXT_PUBLIC_SANITY_PROJECT_ID,
+    dataset:     process.env.NEXT_PUBLIC_SANITY_DATASET,
+    token:       process.env.SANITY_WRITE_TOKEN?.slice(0, 10),
+    gmailUser:   process.env.GMAIL_USER,
+    adminEmail:  process.env.ADMIN_EMAIL,
+    siteName,
   })
 
   let body: ApplyBody
@@ -246,7 +235,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ message: 'Invalid JSON body.' }, { status: 400 })
   }
 
-  // Validate
+  // Validate required fields
   if (!body.name?.trim())
     return NextResponse.json({ message: 'Name is required.' }, { status: 422 })
   if (!body.email?.trim() || !/\S+@\S+\.\S+/.test(body.email))
@@ -269,62 +258,12 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  // Send email
-try {
-  const nodemailer = require('nodemailer')
+  // Send emails (non-fatal — don't block the response if email fails)
+  try {
+    await sendEmails(body)
+  } catch (err: any) {
+    console.error('[apply] Email failed (non-fatal):', err.message)
+  }
 
-  const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: process.env.GMAIL_USER!,
-      pass: process.env.GMAIL_APP_PASSWORD!,
-    },
-  })
-
-  const priceLabel = body.internshipPrice === 0
-    ? 'Free'
-    : `₹${body.internshipPrice.toLocaleString('en-IN')}`
-
-  const skillsLine = body.skills?.length ? body.skills.join(', ') : 'Not specified'
-
-  // Email to applicant
-  await transporter.sendMail({
-    from: `${process.env.NEXT_PUBLIC_SITE_NAME || 'InternHub'} <${process.env.GMAIL_USER}>`,
-    to:   body.email,
-    subject: `✅ Application received – ${body.internshipTitle}`,
-    html: `<p>Hi ${body.name},</p>
-           <p>We've received your application for <strong>${body.internshipTitle}</strong> (${body.internshipDomain} · ${body.internshipDuration} · ${priceLabel}).</p>
-           <p><strong>Your details:</strong><br/>
-           Email: ${body.email}<br/>
-           Phone: ${body.phone || '—'}<br/>
-           College: ${body.college || '—'}<br/>
-           Year: ${body.year || '—'}<br/>
-           Skills: ${skillsLine}</p>
-           <p>Our team will review your application and get back to you within 2–3 business days.</p>
-           <p>— The InternHub Team</p>`,
-  })
-
-  // Notification to admin
-  await transporter.sendMail({
-    from:    `InternHub <${process.env.GMAIL_USER}>`,
-    to:      process.env.ADMIN_EMAIL!,
-    subject: `📋 New application: ${body.name} → ${body.internshipTitle}`,
-    html: `<p>New application received.</p>
-           <ul>
-             <li><strong>Name:</strong> ${body.name}</li>
-             <li><strong>Email:</strong> ${body.email}</li>
-             <li><strong>Phone:</strong> ${body.phone || '—'}</li>
-             <li><strong>Internship:</strong> ${body.internshipTitle}</li>
-             <li><strong>College:</strong> ${body.college || '—'}</li>
-             <li><strong>Skills:</strong> ${skillsLine}</li>
-           </ul>
-           <p><strong>Motivation:</strong><br/>${body.why}</p>
-           ${body.portfolio ? `<p><strong>Portfolio:</strong> <a href="${body.portfolio}">${body.portfolio}</a></p>` : ''}`,
-  })
-
-  console.log('[apply] Emails sent successfully via Gmail')
-} catch (err: any) {
-  console.error('[apply] Email failed (non-fatal):', err.message)
-}
   return NextResponse.json({ success: true, applicationId }, { status: 201 })
 }
